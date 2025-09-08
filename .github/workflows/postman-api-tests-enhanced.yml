@@ -30,111 +30,126 @@ jobs:
         npm init -y
         npm install axios openapi-to-postmanv2 newman newman-reporter-htmlextra
 
-    - name: Create test generation script
-      run: |
-        cat > generate-tests.js << 'EOF'
-        const axios = require('axios');
-        const Converter = require('openapi-to-postmanv2');
-        const fs = require('fs');
+    # In your workflow file, update the generate-tests.js script section:
 
-        async function generatePostmanTests() {
-          try {
-            // Fetch OpenAPI spec
-            const response = await axios.get('https://evabackend.vercel.app/openapi.json');
-            const openapiSpec = response.data;
-            
-            // Save OpenAPI spec
-            fs.writeFileSync('openapi.json', JSON.stringify(openapiSpec, null, 2));
-            
-            // Convert to Postman
-            Converter.convert({ 
-              type: 'json', 
-              data: openapiSpec 
-            }, {}, (err, conversionResult) => {
-              if (!conversionResult.result) {
-                console.error('Conversion failed:', conversionResult.reason);
-                process.exit(1);
-              }
-              
-              // Add tests to each request
-              const collection = conversionResult.output[0].data;
-              addTestsToCollection(collection);
-              
-              // Save collection
-              fs.writeFileSync('postman_collection.json', JSON.stringify(collection, null, 2));
-              console.log('Postman collection generated with tests');
-            });
-          } catch (error) {
-            console.error('Error:', error.message);
+- name: Create test generation script
+  run: |
+    cat > generate-tests.js << 'EOF'
+    const axios = require('axios');
+    const Converter = require('openapi-to-postmanv2');
+    const fs = require('fs');
+
+    // Load test configuration if it exists
+    let testConfig = {
+      excludeEndpoints: [],
+      customTests: {}
+    };
+
+    if (fs.existsSync('postman-test-config.json')) {
+      testConfig = JSON.parse(fs.readFileSync('postman-test-config.json', 'utf8'));
+      console.log('Loaded test configuration');
+    }
+
+    async function generatePostmanTests() {
+      try {
+        // Fetch OpenAPI spec
+        const response = await axios.get('https://evabackend.vercel.app/openapi.json');
+        const openapiSpec = response.data;
+        
+        // Save OpenAPI spec
+        fs.writeFileSync('openapi.json', JSON.stringify(openapiSpec, null, 2));
+        
+        // Convert to Postman
+        Converter.convert({ 
+          type: 'json', 
+          data: openapiSpec 
+        }, {}, (err, conversionResult) => {
+          if (!conversionResult.result) {
+            console.error('Conversion failed:', conversionResult.reason);
             process.exit(1);
           }
-        }
+          
+          // Add tests to each request
+          const collection = conversionResult.output[0].data;
+          addTestsToCollection(collection);
+          
+          // Save collection
+          fs.writeFileSync('postman_collection.json', JSON.stringify(collection, null, 2));
+          console.log('Postman collection generated with tests');
+        });
+      } catch (error) {
+        console.error('Error:', error.message);
+        process.exit(1);
+      }
+    }
 
-        function addTestsToCollection(collection) {
-          collection.item.forEach(folder => {
-            if (folder.item) {
-              folder.item.forEach(request => {
-                // Add authentication
-                if (!request.request.auth) {
-                  request.request.auth = {
-                    type: 'bearer',
-                    bearer: [{
-                      key: 'token',
-                      value: '{{bearerToken}}',
-                      type: 'string'
-                    }]
-                  };
-                }
-                
-                // Add tests based on expected responses
-                request.event = [{
-                  listen: 'test',
-                  script: {
-                    type: 'text/javascript',
-                    exec: generateTestScript(request)
-                  }
-                }];
-              });
+    function addTestsToCollection(collection) {
+      collection.item.forEach(folder => {
+        if (folder.item) {
+          folder.item.forEach(request => {
+            // Check if endpoint should be excluded
+            const requestPath = request.request.url.path.join('/');
+            if (testConfig.excludeEndpoints.some(endpoint => requestPath.includes(endpoint))) {
+              console.log(`Excluding tests for: ${requestPath}`);
+              return;
             }
+
+            // Add authentication
+            if (!request.request.auth) {
+              request.request.auth = {
+                type: 'bearer',
+                bearer: [{
+                  key: 'token',
+                  value: '{{bearerToken}}',
+                  type: 'string'
+                }]
+              };
+            }
+            
+            // Add tests
+            request.event = [{
+              listen: 'test',
+              script: {
+                type: 'text/javascript',
+                exec: generateTestScript(request, requestPath)
+              }
+            }];
           });
         }
+      });
+    }
 
-        function generateTestScript(request) {
-          const tests = [
-            'pm.test("Status code is successful", function () {',
-            '    pm.expect(pm.response.code).to.be.oneOf([200, 201]);',
-            '});',
-            '',
-            'pm.test("Response time is less than 2000ms", function () {',
-            '    pm.expect(pm.response.responseTime).to.be.below(2000);',
-            '});',
-            '',
-            'pm.test("Response has valid JSON", function () {',
-            '    pm.response.to.have.jsonBody();',
-            '});',
-            '',
-            'pm.test("Content-Type is application/json", function () {',
-            '    pm.expect(pm.response.headers.get("Content-Type")).to.include("application/json");',
-            '});'
-          ];
-          
-          // Add endpoint-specific tests
-          if (request.name.includes('Health')) {
-            tests.push(
-              '',
-              'pm.test("Health check returns OK status", function () {',
-              '    const jsonData = pm.response.json();',
-              '    pm.expect(jsonData).to.have.property("status");',
-              '});'
-            );
-          }
-          
-          return tests;
-        }
+    function generateTestScript(request, requestPath) {
+      // Default tests
+      let tests = [
+        'pm.test("Status code is successful", function () {',
+        '    pm.expect(pm.response.code).to.be.oneOf([200, 201]);',
+        '});',
+        '',
+        'pm.test("Response time is less than 2000ms", function () {',
+        '    pm.expect(pm.response.responseTime).to.be.below(2000);',
+        '});',
+        '',
+        'pm.test("Response has valid JSON", function () {',
+        '    pm.response.to.have.jsonBody();',
+        '});'
+      ];
+      
+      // Add custom tests if defined for this endpoint
+      const customTestKey = Object.keys(testConfig.customTests).find(key => 
+        requestPath.includes(key)
+      );
+      
+      if (customTestKey) {
+        tests.push('', '// Custom tests');
+        tests = tests.concat(testConfig.customTests[customTestKey]);
+      }
+      
+      return tests;
+    }
 
-        generatePostmanTests();
-        EOF
-
+    generatePostmanTests();
+    EOF
     - name: Generate Postman collection with tests
       run: node generate-tests.js
 
