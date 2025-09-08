@@ -1,0 +1,89 @@
+name: API Tests with Change Detection
+
+on:
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+jobs:
+  detect-and-test:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+
+    - name: Cache OpenAPI spec
+      uses: actions/cache@v3
+      id: cache-openapi
+      with:
+        path: previous-openapi.json
+        key: openapi-${{ github.sha }}
+        restore-keys: |
+          openapi-
+
+    - name: Detect API changes
+      run: |
+        # Download current spec
+        curl -o current-openapi.json https://evabackend.vercel.app/openapi.json
+        
+        # Check if previous spec exists
+        if [ -f previous-openapi.json ]; then
+          echo "Comparing API specs..."
+          npm install -g json-diff
+          json-diff previous-openapi.json current-openapi.json > api-changes.txt || true
+          
+          if [ -s api-changes.txt ]; then
+            echo "API_CHANGED=true" >> $GITHUB_ENV
+            echo "## 📋 API Changes Detected" >> $GITHUB_STEP_SUMMARY
+            echo '```diff' >> $GITHUB_STEP_SUMMARY
+            cat api-changes.txt >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          else
+            echo "API_CHANGED=false" >> $GITHUB_ENV
+            echo "## ✅ No API Changes" >> $GITHUB_STEP_SUMMARY
+          fi
+        else
+          echo "API_CHANGED=true" >> $GITHUB_ENV
+          echo "## 🆕 First run - no previous spec to compare" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        # Save current as previous for next run
+        cp current-openapi.json previous-openapi.json
+
+    - name: Run tests if changes detected
+      if: env.API_CHANGED == 'true' || github.event_name == 'workflow_dispatch'
+      run: |
+        npm install -g newman openapi-to-postmanv2 newman-reporter-htmlextra
+        
+        # Convert and run tests
+        openapi2postmanv2 -s current-openapi.json -o postman_collection.json -p
+        
+        # Create minimal environment
+        echo '{
+          "name": "EVA Backend",
+          "values": [{
+            "key": "baseUrl",
+            "value": "https://evabackend.vercel.app",
+            "enabled": true
+          }]
+        }' > env.json
+        
+        newman run postman_collection.json -e env.json \
+          --reporters cli,htmlextra \
+          --reporter-htmlextra-export report.html
+
+    - name: Upload results
+      if: env.API_CHANGED == 'true' || github.event_name == 'workflow_dispatch'
+      uses: actions/upload-artifact@v4
+      with:
+        name: api-test-results
+        path: |
+          report.html
+          api-changes.txt
+          postman_collection.json
