@@ -1,0 +1,210 @@
+name: Enhanced Postman API Tests
+
+on:
+  schedule:
+    - cron: '0 2 * * *'
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      test_specific_endpoints:
+        description: 'Test specific endpoints (comma-separated paths)'
+        required: false
+        default: ''
+
+jobs:
+  api-tests:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+
+    - name: Install dependencies
+      run: |
+        npm init -y
+        npm install axios openapi-to-postmanv2 newman newman-reporter-htmlextra
+
+    - name: Create test generation script
+      run: |
+        cat > generate-tests.js << 'EOF'
+        const axios = require('axios');
+        const Converter = require('openapi-to-postmanv2');
+        const fs = require('fs');
+
+        async function generatePostmanTests() {
+          try {
+            // Fetch OpenAPI spec
+            const response = await axios.get('https://evabackend.vercel.app/openapi.json');
+            const openapiSpec = response.data;
+            
+            // Save OpenAPI spec
+            fs.writeFileSync('openapi.json', JSON.stringify(openapiSpec, null, 2));
+            
+            // Convert to Postman
+            Converter.convert({ 
+              type: 'json', 
+              data: openapiSpec 
+            }, {}, (err, conversionResult) => {
+              if (!conversionResult.result) {
+                console.error('Conversion failed:', conversionResult.reason);
+                process.exit(1);
+              }
+              
+              // Add tests to each request
+              const collection = conversionResult.output[0].data;
+              addTestsToCollection(collection);
+              
+              // Save collection
+              fs.writeFileSync('postman_collection.json', JSON.stringify(collection, null, 2));
+              console.log('Postman collection generated with tests');
+            });
+          } catch (error) {
+            console.error('Error:', error.message);
+            process.exit(1);
+          }
+        }
+
+        function addTestsToCollection(collection) {
+          collection.item.forEach(folder => {
+            if (folder.item) {
+              folder.item.forEach(request => {
+                // Add authentication
+                if (!request.request.auth) {
+                  request.request.auth = {
+                    type: 'bearer',
+                    bearer: [{
+                      key: 'token',
+                      value: '{{bearerToken}}',
+                      type: 'string'
+                    }]
+                  };
+                }
+                
+                // Add tests based on expected responses
+                request.event = [{
+                  listen: 'test',
+                  script: {
+                    type: 'text/javascript',
+                    exec: generateTestScript(request)
+                  }
+                }];
+              });
+            }
+          });
+        }
+
+        function generateTestScript(request) {
+          const tests = [
+            'pm.test("Status code is successful", function () {',
+            '    pm.expect(pm.response.code).to.be.oneOf([200, 201]);',
+            '});',
+            '',
+            'pm.test("Response time is less than 2000ms", function () {',
+            '    pm.expect(pm.response.responseTime).to.be.below(2000);',
+            '});',
+            '',
+            'pm.test("Response has valid JSON", function () {',
+            '    pm.response.to.have.jsonBody();',
+            '});',
+            '',
+            'pm.test("Content-Type is application/json", function () {',
+            '    pm.expect(pm.response.headers.get("Content-Type")).to.include("application/json");',
+            '});'
+          ];
+          
+          // Add endpoint-specific tests
+          if (request.name.includes('Health')) {
+            tests.push(
+              '',
+              'pm.test("Health check returns OK status", function () {',
+              '    const jsonData = pm.response.json();',
+              '    pm.expect(jsonData).to.have.property("status");',
+              '});'
+            );
+          }
+          
+          return tests;
+        }
+
+        generatePostmanTests();
+        EOF
+
+    - name: Generate Postman collection with tests
+      run: node generate-tests.js
+
+    - name: Create environment file
+      run: |
+        cat > postman_environment.json << EOF
+        {
+          "name": "EVA Backend Environment",
+          "values": [
+            {
+              "key": "baseUrl",
+              "value": "https://evabackend.vercel.app",
+              "enabled": true
+            },
+            {
+              "key": "bearerToken",
+              "value": "${{ secrets.API_BEARER_TOKEN }}",
+              "enabled": true
+            },
+            {
+              "key": "testUserId",
+              "value": "1",
+              "enabled": true
+            }
+          ]
+        }
+        EOF
+
+    - name: Run API Tests
+      run: |
+        npx newman run postman_collection.json \
+          -e postman_environment.json \
+          --reporters cli,htmlextra \
+          --reporter-htmlextra-export test-results.html \
+          --reporter-htmlextra-title "EVA Backend API Test Results" \
+          --reporter-htmlextra-darkTheme \
+          --insecure \
+          --timeout-request 10000 \
+          --delay-request 100
+
+    - name: Upload test artifacts
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: test-results-${{ github.run_number }}
+        path: |
+          test-results.html
+          postman_collection.json
+          openapi.json
+
+    - name: Comment PR with results
+      if: github.event_name == 'pull_request' && always()
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const fs = require('fs');
+          let comment = '## 🧪 API Test Results\n\n';
+          
+          if (fs.existsSync('test-results.html')) {
+            comment += '✅ Tests completed successfully\n';
+            comment += `- Test Report: [Download Artifact](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})\n`;
+          } else {
+            comment += '❌ Tests failed or did not complete\n';
+          }
+          
+          comment += `\n_Run ID: ${{ github.run_id }}_`;
+          
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: comment
+          });
