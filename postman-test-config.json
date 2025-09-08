@@ -1,0 +1,44 @@
+{
+  "excludeEndpoints": [
+    "/api/eva/health/check",
+    "/api/eva/auth/redis"
+  ],
+  "customTests": {
+    "/api/eva/auth/secure": [
+      "pm.test('Has valid JWT claims', function() {",
+      "  const response = pm.response.json();",
+      "  pm.expect(response).to.have.property('sub');",
+      "  pm.expect(response).to.have.property('exp');",
+      "});"
+    ],
+    "/api/eva/user-info/me": [
+      "pm.test('User info has required fields', function() {",
+      "  const response = pm.response.json();",
+      "  pm.expect(response).to.have.property('id');",
+      "  pm.expect(response).to.have.property('usid');",
+      "  pm.expect(response).to.have.property('referral');",
+      "});"
+    ],
+    "/api/eva/onboarding/questions": [
+      "pm.test('Questions array is not empty', function() {",
+      "  const response = pm.response.json();",
+      "  pm.expect(response).to.be.an('array');",
+      "  pm.expect(response.length).to.be.above(0);",
+      "});"
+    ]
+  },
+  "globalVariables": {
+    "responseTimeout": 3000,
+    "retryAttempts": 2
+  },
+  "testPriority": {
+    "critical": [
+      "/api/eva/auth/secure",
+      "/api/eva/user-info/me"
+    ],
+    "high": [
+      "/api/eva/onboarding/questions",
+      "/api/eva/resume/user-info/me"
+    ]
+  }
+}
