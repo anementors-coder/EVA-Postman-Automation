@@ -1,0 +1,89 @@
+name: Automated Postman API Tests
+
+on:
+  schedule:
+    # Run every day at 2 AM UTC
+    - cron: '0 2 * * *'
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch: # Allow manual trigger
+
+jobs:
+  api-tests:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+
+    - name: Install dependencies
+      run: |
+        npm install -g newman
+        npm install -g openapi-to-postmanv2
+        npm install -g newman-reporter-htmlextra
+
+    - name: Fetch OpenAPI Spec
+      run: |
+        curl -o openapi.json https://evabackend.vercel.app/openapi.json
+        echo "OpenAPI spec downloaded successfully"
+
+    - name: Convert OpenAPI to Postman Collection
+      run: |
+        openapi2postmanv2 -s openapi.json -o postman_collection.json -p
+        echo "Conversion completed"
+
+    - name: Generate Postman Environment
+      run: |
+        cat > postman_environment.json << EOF
+        {
+          "name": "EVA Backend Environment",
+          "values": [
+            {
+              "key": "baseUrl",
+              "value": "https://evabackend.vercel.app",
+              "enabled": true
+            },
+            {
+              "key": "bearerToken",
+              "value": "${{ secrets.API_BEARER_TOKEN }}",
+              "enabled": true
+            }
+          ]
+        }
+        EOF
+
+    - name: Run Newman Tests
+      run: |
+        newman run postman_collection.json \
+          -e postman_environment.json \
+          --reporters cli,htmlextra \
+          --reporter-htmlextra-export newman-report.html \
+          --insecure \
+          --timeout-request 10000
+
+    - name: Upload Test Results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: newman-test-results
+        path: |
+          newman-report.html
+          postman_collection.json
+
+    - name: Publish Test Results Summary
+      if: always()
+      run: |
+        echo "## API Test Results" >> $GITHUB_STEP_SUMMARY
+        echo "Test execution completed at $(date)" >> $GITHUB_STEP_SUMMARY
+        if [ -f newman-report.html ]; then
+          echo "✅ Test report generated successfully" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "❌ Test report generation failed" >> $GITHUB_STEP_SUMMARY
+        fi
